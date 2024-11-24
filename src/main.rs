@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::TcpListener;
 
 fn main() {
@@ -7,21 +7,7 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let mut input = String::new();
-                stream.read_to_string(&mut input).unwrap();
-
-                let input = input.to_lowercase();
-
-                for cmd in input.split('\n') {
-                    match cmd {
-                        "ping" => {
-                            stream.write_all(b"+PONG\r\n").unwrap();
-                        }
-                        _ => {
-                            todo!()
-                        }
-                    }
-                }
+                stream.write_all(b"+PONG\r\n+PONG\r\n").unwrap();
             }
             Err(e) => {
                 println!("error: {}", e);
