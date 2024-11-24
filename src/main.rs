@@ -1,4 +1,4 @@
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -7,15 +7,21 @@ async fn main() -> Result<(), std::io::Error> {
     loop {
         let (mut stream, _) = listener.accept().await?;
 
-        stream.readable().await?;
-        loop {
-            let mut buf = [0; 512];
+        tokio::spawn(async move {
+            loop {
+                let mut buf = [0; 512];
 
-            let read = stream.try_read(&mut buf).unwrap_or_default();
+                let read = match stream.read(&mut buf).await {
+                    Ok(r) => r,
+                    Err(_e) => continue,
+                };
 
-            if read == 0 { continue }
+                if read == 0 {
+                    return Ok::<(), std::io::Error>(());
+                }
 
-            stream.write(b"+PONG\r\n").await?;
-        }
+                stream.write(b"+PONG\r\n").await?;
+            }
+        });
     }
 }
