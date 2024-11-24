@@ -1,4 +1,6 @@
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncWriteExt, BufReader};
+
+mod resp;
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -9,18 +11,19 @@ async fn main() -> Result<(), std::io::Error> {
 
         tokio::spawn(async move {
             loop {
-                let mut buf = [0; 512];
+                let buf = BufReader::new(&mut stream);
+                let cmds = resp::parse(buf).await.unwrap();
 
-                let read = match stream.read(&mut buf).await {
-                    Ok(r) => r,
-                    Err(_e) => continue,
-                };
-
-                if read == 0 {
-                    return Ok::<(), std::io::Error>(());
+                for cmd in cmds {
+                    match cmd {
+                        resp::Cmd::PING => {
+                            stream.write(b"+PONG\r\n").await.unwrap();
+                        }
+                        resp::Cmd::ECHO(msg) => {
+                            stream.write(format!("+{}\r\n", msg).as_bytes()).await.unwrap();
+                        }
+                    }
                 }
-
-                stream.write(b"+PONG\r\n").await?;
             }
         });
     }
