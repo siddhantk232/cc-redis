@@ -4,8 +4,14 @@ use crate::resp::RedisValueRef;
 pub enum Cmd {
     PING,
     ECHO(String),
-    Set(String, String),
+    Set(String, String, Option<Expiry>),
     Get(String),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Expiry {
+    Ex(i64),
+    Px(i64),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -32,16 +38,31 @@ pub fn parse_cmds(raw_cmds: Vec<RedisValueRef>) -> Result<Vec<Cmd>, CmdParseErro
         let cmd = match cmd_str.as_str() {
             "ping" => Cmd::PING,
             "echo" => {
-                let msg = next_string_arg_or_error(iter.next(), &cmd_str)?;
+                let msg = next_string_arg(&mut iter, &cmd_str)?;
                 Cmd::ECHO(msg)
             }
             "set" => {
-                let key = next_string_arg_or_error(iter.next(), &cmd_str)?;
-                let val = next_string_arg_or_error(iter.next(), &cmd_str)?;
-                Cmd::Set(key, val)
+                let key = next_string_arg(&mut iter, &cmd_str)?;
+                let val = next_string_arg(&mut iter, &cmd_str)?;
+
+                // TODO:
+                // https://redis.io/docs/latest/commands/set/
+                // let _nx = try_parse_arg(&mut iter, "nx");
+                // let _xx = try_parse_arg(&mut iter, "xx");
+                // let _xx = try_parse_arg(&mut iter, "get");
+
+                let px = try_parse_arg_value(&mut iter, "px")?
+                    .and_then(|x| x.to_string_int())
+                    .map(Expiry::Px);
+
+                let ex = try_parse_arg_value(&mut iter, "ex")?
+                    .and_then(|x| x.to_string_int())
+                    .map(Expiry::Ex);
+
+                Cmd::Set(key, val, px.or(ex))
             }
             "get" => {
-                let key = next_string_arg_or_error(iter.next(), &cmd_str)?;
+                let key = next_string_arg(&mut iter, &cmd_str)?;
                 Cmd::Get(key)
             }
             _ => {
@@ -55,10 +76,50 @@ pub fn parse_cmds(raw_cmds: Vec<RedisValueRef>) -> Result<Vec<Cmd>, CmdParseErro
     Ok(res)
 }
 
-fn next_string_arg_or_error(
-    o: Option<RedisValueRef>,
+#[allow(unused)]
+fn try_parse_arg(
+    iter: &mut std::iter::Peekable<impl Iterator<Item = RedisValueRef>>,
+    arg: &str,
+) -> Option<RedisValueRef> {
+    if let Some(val) = iter.peek() {
+        match val.as_str() {
+            Some(val) if val.to_lowercase() == arg => iter.next(),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// Parse the value of the next argument if it's present
+/// Example: SET foo bar [px 100 | ex 100]
+/// This will parse the value of px or ex
+fn try_parse_arg_value(
+    iter: &mut std::iter::Peekable<impl Iterator<Item = RedisValueRef>>,
+    arg: &str,
+) -> Result<Option<RedisValueRef>, CmdParseError> {
+    if let Some(val) = iter.peek() {
+        match val.as_str() {
+            Some(val) if val.to_lowercase() == arg => {
+                iter.next().expect("arg has been peeked");
+                if let Some(val) = iter.next() {
+                    Ok(Some(val))
+                } else {
+                    return Err(CmdParseError::IncompleteCommand(arg.to_string()));
+                }
+            }
+            _ => Ok(None),
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+fn next_string_arg(
+    iter: &mut impl Iterator<Item = RedisValueRef>,
     cmd_str: &str,
 ) -> Result<String, CmdParseError> {
+    let o = iter.next();
     match o.and_then(|v| v.to_string()) {
         Some(s) => Ok(s),
         None => Err(CmdParseError::IncompleteCommand(cmd_str.to_string())),
@@ -88,14 +149,20 @@ mod tests {
             RedisValueRef::String("value".into()),
             RedisValueRef::String("GET".into()),
             RedisValueRef::String("key".into()),
+            RedisValueRef::String("SET".into()),
+            RedisValueRef::String("foo".into()),
+            RedisValueRef::String("bar".into()),
+            RedisValueRef::String("px".into()),
+            RedisValueRef::String("100".into()),
         ];
 
         let cmds = parse_cmds(input).unwrap();
         assert_eq!(
             cmds,
             vec![
-                Cmd::Set("key".to_string(), "value".to_string()),
+                Cmd::Set("key".to_string(), "value".to_string(), None),
                 Cmd::Get("key".to_string()),
+                Cmd::Set("foo".to_string(), "bar".to_string(), Some(Expiry::Px(100))),
             ]
         );
     }

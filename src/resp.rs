@@ -1,6 +1,5 @@
 ///! Redis RESP parser. Mostly taken from
 ///! https://github.com/dpbriggs/redis-oxide/blob/535333eae64c9709614b34d4450f32f57372bb3d/src/asyncresp.rs
-
 use bytes::{Bytes, BytesMut};
 
 /// Special constants in the RESP protocol.
@@ -80,6 +79,19 @@ impl RedisValueRef {
             RedisValueRef::Array(v) => Some(v),
             _ => None,
         }
+    }
+
+    #[allow(unused)]
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            RedisValueRef::Int(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Convert to a string then parse the string as int
+    pub fn to_string_int(self) -> Option<i64> {
+        self.to_string().and_then(|x| x.parse().ok())
     }
 }
 
@@ -292,11 +304,10 @@ fn write_redis_value(item: RedisValueRef, dst: &mut BytesMut) {
     }
 }
 
-
 #[cfg(test)]
 mod resp_parser_tests {
-    use super::RespParser;
     use super::RedisValueRef;
+    use super::RespParser;
     use bytes::{Bytes, BytesMut};
     use tokio_util::codec::{Decoder, Encoder};
 
@@ -366,7 +377,6 @@ mod resp_parser_tests {
     fn ezs() -> Bytes {
         Bytes::from_static(b"hello")
     }
-
 
     #[test]
     fn test_error() {
