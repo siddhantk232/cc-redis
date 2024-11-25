@@ -2,8 +2,8 @@ use crate::resp::RedisValueRef;
 
 #[derive(Debug, PartialEq)]
 pub enum Cmd {
-    PING,
-    ECHO(String),
+    Ping,
+    Eecho(String),
     Set(String, String, Option<Expiry>),
     Get(String),
 }
@@ -36,10 +36,10 @@ pub fn parse_cmds(raw_cmds: Vec<RedisValueRef>) -> Result<Vec<Cmd>, CmdParseErro
         // resp cmds are case-insensitive
         let cmd_str = cmd_str.to_lowercase();
         let cmd = match cmd_str.as_str() {
-            "ping" => Cmd::PING,
+            "ping" => Cmd::Ping,
             "echo" => {
                 let msg = next_string_arg(&mut iter, &cmd_str)?;
-                Cmd::ECHO(msg)
+                Cmd::Eecho(msg)
             }
             "set" => {
                 let key = next_string_arg(&mut iter, &cmd_str)?;
@@ -105,7 +105,7 @@ fn try_parse_arg_value(
                 if let Some(val) = iter.next() {
                     Ok(Some(val))
                 } else {
-                    return Err(CmdParseError::IncompleteCommand(arg.to_string()));
+                    Err(CmdParseError::IncompleteCommand(arg.to_string()))
                 }
             }
             _ => Ok(None),
@@ -138,7 +138,7 @@ mod tests {
             RedisValueRef::String("HELLO".into()),
         ];
         let cmds = parse_cmds(input).unwrap();
-        assert_eq!(cmds, vec![Cmd::PING, Cmd::ECHO("HELLO".to_string())]);
+        assert_eq!(cmds, vec![Cmd::Ping, Cmd::Eecho("HELLO".to_string())]);
     }
 
     #[test]

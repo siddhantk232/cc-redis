@@ -26,7 +26,7 @@ async fn main() -> Result<(), std::io::Error> {
 
         tokio::spawn(async move {
             loop {
-                let mut reader = FramedRead::new(&mut stream, resp::RespParser::default());
+                let mut reader = FramedRead::new(&mut stream, resp::RespParser);
                 let input = reader.next().await.unwrap().unwrap();
                 assert!(matches!(input, resp::RedisValueRef::Array(_)));
 
@@ -37,17 +37,17 @@ async fn main() -> Result<(), std::io::Error> {
 
                 for cmd in cmds {
                     match cmd {
-                        cmd::Cmd::PING => {
+                        cmd::Cmd::Ping => {
                             stream.write(b"+PONG\r\n").await.unwrap();
                         }
-                        cmd::Cmd::ECHO(msg) => {
+                        cmd::Cmd::Eecho(msg) => {
                             stream
                                 .write(format!("+{}\r\n", msg).as_bytes())
                                 .await
                                 .unwrap();
                         }
                         cmd::Cmd::Get(key) => {
-                            let mut encoder = resp::RespParser::default();
+                            let mut encoder = resp::RespParser;
                             let mut response = Default::default();
 
                             match store.get_async(&key).await {

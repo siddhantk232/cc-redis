@@ -1,5 +1,5 @@
-///! Redis RESP parser. Mostly taken from
-///! https://github.com/dpbriggs/redis-oxide/blob/535333eae64c9709614b34d4450f32f57372bb3d/src/asyncresp.rs
+//! Redis RESP parser. Mostly taken from
+//! https://github.com/dpbriggs/redis-oxide/blob/535333eae64c9709614b34d4450f32f57372bb3d/src/asyncresp.rs
 use bytes::{Bytes, BytesMut};
 
 /// Special constants in the RESP protocol.
