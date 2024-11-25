@@ -26,3 +26,4 @@ tokio = { version = "1.23.0", features = ["full"] }    # async networking
 tokio-util = { version = "0.7", features = ["codec"] } # Decoder and Encoder traits
 tokio-stream = "0.1.0"                                 # async streaming
 memchr = "2"
+scc = "2"
