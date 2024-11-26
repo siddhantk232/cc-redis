@@ -3,9 +3,10 @@ use crate::resp::RedisValueRef;
 #[derive(Debug, PartialEq)]
 pub enum Cmd {
     Ping,
-    Eecho(String),
-    Set(String, String, Option<Expiry>),
+    Echo(String),
+    Set(String, RedisValueRef, Option<Expiry>),
     Get(String),
+    Incr(String),
 }
 
 #[derive(Debug, PartialEq)]
@@ -39,11 +40,11 @@ pub fn parse_cmds(raw_cmds: Vec<RedisValueRef>) -> Result<Vec<Cmd>, CmdParseErro
             "ping" => Cmd::Ping,
             "echo" => {
                 let msg = next_string_arg(&mut iter, &cmd_str)?;
-                Cmd::Eecho(msg)
+                Cmd::Echo(msg)
             }
             "set" => {
                 let key = next_string_arg(&mut iter, &cmd_str)?;
-                let val = next_string_arg(&mut iter, &cmd_str)?;
+                let val = next_arg(&mut iter, &cmd_str)?;
 
                 // TODO:
                 // https://redis.io/docs/latest/commands/set/
@@ -64,6 +65,10 @@ pub fn parse_cmds(raw_cmds: Vec<RedisValueRef>) -> Result<Vec<Cmd>, CmdParseErro
             "get" => {
                 let key = next_string_arg(&mut iter, &cmd_str)?;
                 Cmd::Get(key)
+            }
+            "incr" => {
+                let key = next_string_arg(&mut iter, &cmd_str)?;
+                Cmd::Incr(key)
             }
             _ => {
                 unreachable!("unknown command: {:?}", raw_cmd);
@@ -88,6 +93,18 @@ fn try_parse_arg(
         }
     } else {
         None
+    }
+}
+
+#[allow(unused)]
+fn next_arg(
+    iter: &mut impl Iterator<Item = RedisValueRef>,
+    cmd_str: &str,
+) -> Result<RedisValueRef, CmdParseError> {
+    let o = iter.next();
+    match o {
+        Some(s) => Ok(s),
+        None => Err(CmdParseError::IncompleteCommand(cmd_str.to_string())),
     }
 }
 
@@ -138,7 +155,7 @@ mod tests {
             RedisValueRef::String("HELLO".into()),
         ];
         let cmds = parse_cmds(input).unwrap();
-        assert_eq!(cmds, vec![Cmd::Ping, Cmd::Eecho("HELLO".to_string())]);
+        assert_eq!(cmds, vec![Cmd::Ping, Cmd::Echo("HELLO".to_string())]);
     }
 
     #[test]
@@ -154,16 +171,31 @@ mod tests {
             RedisValueRef::String("bar".into()),
             RedisValueRef::String("px".into()),
             RedisValueRef::String("100".into()),
+            RedisValueRef::String("SET".into()),
+            RedisValueRef::String("key".into()),
+            RedisValueRef::Int(1),
         ];
 
         let cmds = parse_cmds(input).unwrap();
         assert_eq!(
             cmds,
             vec![
-                Cmd::Set("key".to_string(), "value".to_string(), None),
+                Cmd::Set("key".to_string(), RedisValueRef::String("value".into()), None),
                 Cmd::Get("key".to_string()),
-                Cmd::Set("foo".to_string(), "bar".to_string(), Some(Expiry::Px(100))),
+                Cmd::Set("foo".to_string(), RedisValueRef::String("bar".into()), Some(Expiry::Px(100))),
+                Cmd::Set("key".to_string(), RedisValueRef::Int(1), None),
             ]
         );
+    }
+
+    #[test]
+    fn test_incr_cmd() {
+        let input = vec![
+            RedisValueRef::String("INCR".into()),
+            RedisValueRef::String("key".into()),
+        ];
+
+        let cmds = parse_cmds(input).unwrap();
+        assert_eq!(cmds, vec![Cmd::Incr("key".to_string()),]);
     }
 }

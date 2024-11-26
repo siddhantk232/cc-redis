@@ -11,12 +11,23 @@ mod resp;
 // temporary solution for today
 #[derive(Debug)]
 struct Val {
-    val: String,
+    val: resp::RedisValueRef,
     eat: Option<SystemTime>,
+}
+
+macro_rules! write_response {
+    ($stream:expr, $response:expr) => {
+        let mut encoder = resp::RespParser;
+        let mut response = Default::default();
+
+        let _ = encoder.encode($response, &mut response).unwrap();
+        $stream.write(&response).await.unwrap();
+    };
 }
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
+    use cmd::Cmd::*;
     let store = Arc::new(scc::HashMap::<String, Val>::new());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:6379").await?;
 
@@ -37,20 +48,17 @@ async fn main() -> Result<(), std::io::Error> {
 
                 for cmd in cmds {
                     match cmd {
-                        cmd::Cmd::Ping => {
+                        Ping => {
                             stream.write(b"+PONG\r\n").await.unwrap();
                         }
-                        cmd::Cmd::Eecho(msg) => {
+                        Echo(msg) => {
                             stream
                                 .write(format!("+{}\r\n", msg).as_bytes())
                                 .await
                                 .unwrap();
                         }
-                        cmd::Cmd::Get(key) => {
-                            let mut encoder = resp::RespParser;
-                            let mut response = Default::default();
-
-                            match store.get_async(&key).await {
+                        Get(key) => {
+                            let res = match store.get_async(&key).await {
                                 Some(val) => {
                                     let entry = val.get();
 
@@ -58,33 +66,18 @@ async fn main() -> Result<(), std::io::Error> {
                                         && SystemTime::now() > entry.eat.expect("checked for none")
                                     {
                                         dbg!("removed: ", val.remove_entry().0);
-                                        encoder
-                                            .encode(
-                                                resp::RedisValueRef::NullBulkString,
-                                                &mut response,
-                                            )
-                                            .unwrap();
+                                        resp::RedisValueRef::NullBulkString
                                     } else {
-                                        encoder
-                                            .encode(
-                                                resp::RedisValueRef::String(
-                                                    entry.val.clone().into(),
-                                                ),
-                                                &mut response,
-                                            )
-                                            .unwrap();
+                                        entry.val.clone()
                                     }
                                 }
-                                None => {
-                                    encoder
-                                        .encode(resp::RedisValueRef::NullBulkString, &mut response)
-                                        .unwrap();
-                                }
+                                None => resp::RedisValueRef::NullBulkString,
                             };
 
-                            stream.write(&response).await.unwrap();
+                            write_response!(stream, res);
                         }
-                        cmd::Cmd::Set(key, val, exp) => {
+                        Set(key, val, exp) => {
+                            dbg!(&val);
                             let val = Val {
                                 val,
                                 eat: exp.map(|x| match x {
@@ -98,6 +91,26 @@ async fn main() -> Result<(), std::io::Error> {
                             };
                             let _ = store.insert_async(key, val).await;
                             stream.write(b"+OK\r\n").await.unwrap();
+                        }
+                        Incr(key) => {
+                            let res = {
+                                let mut entry = store.entry_async(key).await.or_insert(Val {
+                                    val: resp::RedisValueRef::String("0".into()),
+                                    eat: None,
+                                });
+
+                                let val = entry.get().val.clone();
+                                let new_val = match val.to_string_int() {
+                                    Some(v) => v + 1,
+                                    None => panic!("unexpected value"),
+                                };
+
+                                let res = resp::RedisValueRef::String(new_val.to_string().into());
+                                entry.get_mut().val = res.clone();
+                                res
+                            };
+
+                            write_response!(stream, res);
                         }
                     }
                 }
