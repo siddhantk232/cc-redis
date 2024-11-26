@@ -68,7 +68,7 @@ async fn main() -> Result<(), std::io::Error> {
                                         dbg!("removed: ", val.remove_entry().0);
                                         resp::RedisValueRef::NullBulkString
                                     } else {
-                                        // TODO: GET only handles string values
+                                        assert!(matches!(entry.val, resp::RedisValueRef::String(_)));
                                         entry.val.clone()
                                     }
                                 }
@@ -101,24 +101,14 @@ async fn main() -> Result<(), std::io::Error> {
                                 });
 
                                 let val = entry.get().val.clone();
-
-                                let new_val = match val {
-                                    resp::RedisValueRef::String(v) => {
-                                        let v = std::str::from_utf8(v.as_ref())
-                                            .ok()
-                                            .and_then(|v| v.parse::<i64>().ok());
-                                        match v {
-                                            Some(v) => v + 1,
-                                            None => panic!("unexpected value"),
-                                        }
-                                    }
-                                    resp::RedisValueRef::Int(v) => v + 1,
+                                let new_val = match val.to_string_int() {
+                                    Some(v) => v + 1,
                                     _ => unreachable!("unexpected value"),
                                 };
 
-                                let res = resp::RedisValueRef::Int(new_val);
+                                let res = resp::RedisValueRef::String(new_val.to_string().into());
                                 entry.get_mut().val = res.clone();
-                                res
+                                resp::RedisValueRef::Int(new_val)
                             };
 
                             write_response!(stream, res);
