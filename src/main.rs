@@ -68,7 +68,10 @@ async fn main() -> Result<(), std::io::Error> {
                                         dbg!("removed: ", val.remove_entry().0);
                                         resp::RedisValueRef::NullBulkString
                                     } else {
-                                        assert!(matches!(entry.val, resp::RedisValueRef::String(_)));
+                                        assert!(matches!(
+                                            entry.val,
+                                            resp::RedisValueRef::String(_)
+                                        ));
                                         entry.val.clone()
                                     }
                                 }
@@ -94,21 +97,25 @@ async fn main() -> Result<(), std::io::Error> {
                             stream.write(b"+OK\r\n").await.unwrap();
                         }
                         Incr(key) => {
-                            let res = {
-                                let mut entry = store.entry_async(key).await.or_insert(Val {
-                                    val: resp::RedisValueRef::String("0".into()),
-                                    eat: None,
-                                });
+                            let mut entry = store.entry_async(key).await.or_insert(Val {
+                                val: resp::RedisValueRef::String("0".into()),
+                                eat: None,
+                            });
 
-                                let val = entry.get().val.clone();
-                                let new_val = match val.to_string_int() {
-                                    Some(v) => v + 1,
-                                    _ => unreachable!("unexpected value"),
-                                };
+                            let val = entry.get().val.clone();
+                            let new_val = val.to_string_int().map(|v| v + 1);
 
-                                let res = resp::RedisValueRef::String(new_val.to_string().into());
-                                entry.get_mut().val = res.clone();
-                                resp::RedisValueRef::Int(new_val)
+                            let res = match new_val {
+                                Some(new_val) => {
+                                    let res =
+                                        resp::RedisValueRef::String(new_val.to_string().into());
+                                    entry.get_mut().val = res.clone();
+
+                                    resp::RedisValueRef::Int(new_val)
+                                }
+                                None => resp::RedisValueRef::Error(
+                                    "ERR value is not an integer or out of range".into(),
+                                ),
                             };
 
                             write_response!(stream, res);
