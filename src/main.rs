@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use core::net::SocketAddr;
 use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Encoder, FramedRead};
@@ -17,14 +18,19 @@ struct Val {
     eat: Option<SystemTime>,
 }
 
+#[derive(Debug, Default, Clone)]
+struct Store {
+    db: Arc<scc::HashMap<String, Val>>,
+    transactions: Arc<scc::HashMap<SocketAddr, Vec<cmd::Cmd>>>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
-    use cmd::Cmd::*;
-    let store = Arc::new(scc::HashMap::<String, Val>::new());
+    let store = Store::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:6379").await?;
 
     loop {
-        let (mut stream, _) = listener.accept().await?;
+        let (mut stream, conn) = listener.accept().await?;
         let store = store.clone();
 
         tokio::spawn(async move {
@@ -39,6 +45,7 @@ async fn main() -> Result<(), std::io::Error> {
                 let cmds = cmd::parse_cmds(input).unwrap();
 
                 for cmd in cmds {
+                    use cmd::Cmd::*;
                     match cmd {
                         Ping => {
                             stream.write(b"+PONG\r\n").await.unwrap();
@@ -50,7 +57,7 @@ async fn main() -> Result<(), std::io::Error> {
                                 .unwrap();
                         }
                         Get(key) => {
-                            let res = match store.get_async(&key).await {
+                            let res = match store.db.get_async(&key).await {
                                 Some(val) => {
                                     let entry = val.get();
 
@@ -85,11 +92,11 @@ async fn main() -> Result<(), std::io::Error> {
                                         .unwrap(),
                                 }),
                             };
-                            let _ = store.insert_async(key, val).await;
+                            let _ = store.db.insert_async(key, val).await;
                             stream.write(b"+OK\r\n").await.unwrap();
                         }
                         Incr(key) => {
-                            let mut entry = store.entry_async(key).await.or_insert(Val {
+                            let mut entry = store.db.entry_async(key).await.or_insert(Val {
                                 val: resp::RedisValueRef::String("0".into()),
                                 eat: None,
                             });
@@ -111,9 +118,24 @@ async fn main() -> Result<(), std::io::Error> {
                             };
 
                             write_response!(stream, res);
-                        },
+                        }
                         Multi => {
+                            store.transactions.insert_async(conn, vec![]).await.unwrap();
                             stream.write(b"+OK\r\n").await.unwrap();
+                        }
+                        Exec => {
+                            match store.transactions.read_async(&conn, |_sock, _tsx| {}).await {
+                                None => {
+                                    write_response!(
+                                        stream,
+                                        resp::RedisValueRef::Error("ERR EXEC without MULTI".into())
+                                    );
+                                }
+                                Some(()) => {
+                                    // TODO: exec tsx
+                                    stream.write(b"+OK\r\n").await.unwrap();
+                                }
+                            }
                         }
                     }
                 }

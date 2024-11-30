@@ -1,19 +1,26 @@
 use crate::resp::RedisValueRef;
 
+/// Redis commands
 #[derive(Debug, PartialEq)]
 pub enum Cmd {
     Ping,
     Echo(String),
     Set(String, RedisValueRef, Option<Expiry>),
     Get(String),
+    /// Increment a numeric value
     Incr(String),
     /// Start of a transaction
     Multi,
+    /// Execute a transaction
+    Exec,
 }
 
+/// Duration after which the associated key will be removed
 #[derive(Debug, PartialEq)]
 pub enum Expiry {
+    /// Seconds
     Ex(i64),
+    /// Miliseconds
     Px(i64),
 }
 
@@ -73,6 +80,7 @@ pub fn parse_cmds(raw_cmds: Vec<RedisValueRef>) -> Result<Vec<Cmd>, CmdParseErro
                 Cmd::Incr(key)
             }
             "multi" => Cmd::Multi,
+            "exec" => Cmd::Exec,
             _ => {
                 unreachable!("unknown command: {:?}", raw_cmd);
             }
@@ -183,9 +191,17 @@ mod tests {
         assert_eq!(
             cmds,
             vec![
-                Cmd::Set("key".to_string(), RedisValueRef::String("value".into()), None),
+                Cmd::Set(
+                    "key".to_string(),
+                    RedisValueRef::String("value".into()),
+                    None
+                ),
                 Cmd::Get("key".to_string()),
-                Cmd::Set("foo".to_string(), RedisValueRef::String("bar".into()), Some(Expiry::Px(100))),
+                Cmd::Set(
+                    "foo".to_string(),
+                    RedisValueRef::String("bar".into()),
+                    Some(Expiry::Px(100))
+                ),
                 Cmd::Set("key".to_string(), RedisValueRef::Int(1), None),
             ]
         );
@@ -203,9 +219,12 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_cmd() {
-        let input = vec![RedisValueRef::String("MULTI".into())];
+    fn test_transaction_cmds() {
+        let input = vec![
+            RedisValueRef::String("MULTI".into()),
+            RedisValueRef::String("EXEC".into()),
+        ];
         let cmds = parse_cmds(input).unwrap();
-        assert_eq!(cmds, vec![Cmd::Multi]);
+        assert_eq!(cmds, vec![Cmd::Multi, Cmd::Exec]);
     }
 }
