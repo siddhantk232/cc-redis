@@ -7,22 +7,14 @@ use tokio_util::codec::{Encoder, FramedRead};
 
 mod cmd;
 mod resp;
+#[macro_use]
+mod utils;
 
 // temporary solution for today
 #[derive(Debug)]
 struct Val {
     val: resp::RedisValueRef,
     eat: Option<SystemTime>,
-}
-
-macro_rules! write_response {
-    ($stream:expr, $response:expr) => {
-        let mut encoder = resp::RespParser;
-        let mut response = Default::default();
-
-        let _ = encoder.encode($response, &mut response).unwrap();
-        $stream.write(&response).await.unwrap();
-    };
 }
 
 #[tokio::main]
