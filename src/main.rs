@@ -132,8 +132,11 @@ async fn main() -> Result<(), std::io::Error> {
                                     );
                                 }
                                 Some(()) => {
-                                    // TODO: exec tsx
-                                    stream.write(b"+OK\r\n").await.unwrap();
+                                    // TODO: actually exec tsx cmds
+                                    let _k = store.transactions.remove_async(&conn).await.expect(
+                                        "tsx must exist since None has already been checked",
+                                    );
+                                    write_response!(stream, resp::RedisValueRef::Array(vec![]));
                                 }
                             }
                         }
