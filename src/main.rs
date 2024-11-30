@@ -113,7 +113,7 @@ async fn main() -> Result<(), std::io::Error> {
                             write_response!(stream, res);
                         },
                         Multi => {
-                            todo!()
+                            stream.write(b"+OK\r\n").await.unwrap();
                         }
                     }
                 }
