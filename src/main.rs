@@ -119,6 +119,9 @@ async fn main() -> Result<(), std::io::Error> {
                             };
 
                             write_response!(stream, res);
+                        },
+                        Multi => {
+                            todo!()
                         }
                     }
                 }

@@ -7,6 +7,8 @@ pub enum Cmd {
     Set(String, RedisValueRef, Option<Expiry>),
     Get(String),
     Incr(String),
+    /// Start of a transaction
+    Multi,
 }
 
 #[derive(Debug, PartialEq)]
@@ -70,6 +72,7 @@ pub fn parse_cmds(raw_cmds: Vec<RedisValueRef>) -> Result<Vec<Cmd>, CmdParseErro
                 let key = next_string_arg(&mut iter, &cmd_str)?;
                 Cmd::Incr(key)
             }
+            "multi" => Cmd::Multi,
             _ => {
                 unreachable!("unknown command: {:?}", raw_cmd);
             }
@@ -197,5 +200,12 @@ mod tests {
 
         let cmds = parse_cmds(input).unwrap();
         assert_eq!(cmds, vec![Cmd::Incr("key".to_string()),]);
+    }
+
+    #[test]
+    fn test_multi_cmd() {
+        let input = vec![RedisValueRef::String("MULTI".into())];
+        let cmds = parse_cmds(input).unwrap();
+        assert_eq!(cmds, vec![Cmd::Multi]);
     }
 }
