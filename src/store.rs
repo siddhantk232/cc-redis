@@ -46,30 +46,22 @@ impl StoreRef {
 
     /// Create an empty transaction for the given connection
     pub async fn create_transaction(&self, conn: SocketAddr) {
-        let _ = self.inner
-            .lock()
-            .unwrap()
-            .transactions
-            .insert(conn, vec![]);
+        let _ = self.inner.lock().unwrap().transactions.upsert(conn, vec![]);
     }
 
     pub async fn remove_transaction(&self, conn: &SocketAddr) -> Option<(SocketAddr, Vec<Cmd>)> {
-        self.inner
-            .lock()
-            .unwrap()
-            .transactions
-            .remove(conn)
+        self.inner.lock().unwrap().transactions.remove(conn)
     }
 
     /// Add [Cmd] to the transaction for the given [SocketAddr]
     pub async fn append_cmd_to_transaction(&self, addr: &SocketAddr, cmd: Cmd) {
-        self.inner
+        let _ = self
+            .inner
             .lock()
             .unwrap()
             .transactions
             .entry(*addr)
-            .or_insert(vec![])
-            .push(cmd);
+            .and_modify(|v| v.push(cmd));
     }
 
     #[allow(unused)]
@@ -82,11 +74,7 @@ impl StoreRef {
     where
         Q: Equivalent<String> + Hash,
     {
-        self.inner
-            .lock()
-            .unwrap()
-            .db
-            .read(key, |_k, v| v.clone())
+        self.inner.lock().unwrap().db.read(key, |_k, v| v.clone())
     }
 
     /// Remove the entry from the store returning it if it exists
@@ -105,11 +93,7 @@ impl StoreRef {
 
     /// Update the value
     pub async fn update(&self, key: &String, val: Val) {
-        self.inner
-            .lock()
-            .unwrap()
-            .db
-            .update(key, |_, v| *v = val);
+        self.inner.lock().unwrap().db.update(key, |_, v| *v = val);
     }
 }
 
@@ -128,6 +112,7 @@ mod test {
         assert_eq!(store.transaction_exists(&addr).await, false);
 
         let cmd1 = Cmd::Set("key".to_string(), RedisValueRef::String("val".into()), None);
+        store.create_transaction(addr).await;
         store.append_cmd_to_transaction(&addr, cmd1.clone()).await;
 
         assert_eq!(store.transaction_exists(&addr).await, true);

@@ -1,14 +1,12 @@
 use std::{net::SocketAddr, time::SystemTime};
 
-use tokio::io::AsyncWriteExt;
+use futures_util::SinkExt;
 use tokio_stream::StreamExt;
-use tokio_util::codec::{Encoder, FramedRead};
+use tokio_util::codec::Decoder;
 
 mod cmd;
 mod resp;
 mod store;
-#[macro_use]
-mod utils;
 
 use cmd::Cmd;
 use resp::RedisValueRef;
@@ -20,16 +18,19 @@ async fn main() -> Result<(), std::io::Error> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:6379").await?;
 
     loop {
-        let (mut stream, conn) = listener.accept().await?;
+        let (stream, conn) = listener.accept().await?;
         let store = store.clone();
 
         tokio::spawn(async move {
-            loop {
-                let mut reader = FramedRead::new(&mut stream, resp::RespParser);
-                let Some(input) = reader.next().await else {
-                    continue;
+            let mut transport = resp::RespParser::default().framed(stream);
+
+            while let Some(input) = transport.next().await {
+                let input = match input {
+                    Ok(i) => i,
+                    Err(e) => {
+                        panic!("{}", e);
+                    }
                 };
-                let input = input.unwrap();
                 assert!(matches!(input, RedisValueRef::Array(_)));
 
                 let input = input
@@ -41,11 +42,14 @@ async fn main() -> Result<(), std::io::Error> {
                     use Cmd::*;
                     match cmd {
                         Ping => {
-                            stream.write(b"+PONG\r\n").await.unwrap();
+                            transport
+                                .send(RedisValueRef::String("PONG".into()))
+                                .await
+                                .unwrap();
                         }
                         Echo(msg) => {
-                            stream
-                                .write(format!("+{}\r\n", msg).as_bytes())
+                            transport
+                                .send(RedisValueRef::String(msg.into()))
                                 .await
                                 .unwrap();
                         }
@@ -53,8 +57,8 @@ async fn main() -> Result<(), std::io::Error> {
                             if let Some(resp) =
                                 queue_if_transaction(cmd.clone(), &conn, store.clone()).await
                             {
-                                write_response!(stream, resp);
-                                return;
+                                transport.send(resp).await.unwrap();
+                                continue;
                             }
 
                             let res = match store.read(key).await {
@@ -72,14 +76,14 @@ async fn main() -> Result<(), std::io::Error> {
                                 None => RedisValueRef::NullBulkString,
                             };
 
-                            write_response!(stream, res);
+                            transport.send(res).await.unwrap();
                         }
                         Set(ref key, ref val, ref exp) => {
                             if let Some(resp) =
                                 queue_if_transaction(cmd.clone(), &conn, store.clone()).await
                             {
-                                write_response!(stream, resp);
-                                return;
+                                transport.send(resp).await.unwrap();
+                                continue;
                             }
 
                             let val = Val {
@@ -94,14 +98,14 @@ async fn main() -> Result<(), std::io::Error> {
                                 }),
                             };
                             let _ = store.insert(key.clone(), val).await;
-                            stream.write(b"+OK\r\n").await.unwrap();
+                            write_ok(&mut transport).await;
                         }
                         Incr(ref key) => {
                             if let Some(resp) =
                                 queue_if_transaction(cmd.clone(), &conn, store.clone()).await
                             {
-                                write_response!(stream, resp);
-                                return;
+                                transport.send(resp).await.unwrap();
+                                continue;
                             }
 
                             let entry = store.read(key).await.unwrap_or(Val {
@@ -127,23 +131,23 @@ async fn main() -> Result<(), std::io::Error> {
                                 ),
                             };
 
-                            write_response!(stream, res);
+                            transport.send(res).await.unwrap();
                         }
                         Multi => {
                             // TODO: do we support nested transactions?
                             store.create_transaction(conn).await;
-                            stream.write(b"+OK\r\n").await.unwrap();
+                            write_ok(&mut transport).await;
                         }
                         Exec => {
                             if store.transaction_exists(&conn).await {
                                 // TODO: actually exec tsx cmds
                                 let _k = store.remove_transaction(&conn).await;
-                                write_response!(stream, RedisValueRef::Array(vec![]));
+                                transport.send(RedisValueRef::Array(vec![])).await.unwrap();
                             } else {
-                                write_response!(
-                                    stream,
-                                    RedisValueRef::Error("ERR EXEC without MULTI".into())
-                                );
+                                transport
+                                    .send(RedisValueRef::Error("ERR EXEC without MULTI".into()))
+                                    .await
+                                    .unwrap();
                             }
                         }
                     }
@@ -167,4 +171,16 @@ async fn queue_if_transaction(
     store.append_cmd_to_transaction(conn, cmd).await;
 
     Some(RedisValueRef::String("QUEUED".into()))
+}
+
+#[inline]
+async fn write_ok<S>(transport: &mut S)
+where
+    S: futures_util::Sink<RedisValueRef> + Unpin,
+    S::Error: std::fmt::Debug,
+{
+    transport
+        .send(RedisValueRef::String("OK".into()))
+        .await
+        .unwrap();
 }
