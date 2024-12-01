@@ -92,8 +92,8 @@ impl StoreRef {
     }
 
     /// Update the value
-    pub async fn update(&self, key: &String, val: Val) {
-        self.inner.lock().unwrap().db.update(key, |_, v| *v = val);
+    pub async fn update(&self, key: String, val: Val) {
+        self.inner.lock().unwrap().db.upsert(key, val);
     }
 }
 

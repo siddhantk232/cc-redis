@@ -122,7 +122,7 @@ async fn main() -> Result<(), std::io::Error> {
                                         val: res,
                                         eat: entry.eat,
                                     };
-                                    store.update(key, res).await;
+                                    store.update(key.clone(), res).await;
 
                                     RedisValueRef::Int(new_val)
                                 }
