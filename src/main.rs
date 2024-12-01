@@ -154,6 +154,10 @@ fn run_cmd(cmd: Cmd, store: &mut Store, conn: &SocketAddr) -> RedisValueRef {
             store.create_transaction(*conn);
             RedisValueRef::String("OK".into())
         }
+        Discard => match store.remove_transaction(conn) {
+            Some(_) => RedisValueRef::String("OK".into()),
+            None => RedisValueRef::Error("ERR DISCARD without MULTI".into()),
+        },
         Exec => {
             panic!(
                 "Exec is handled outside of `run_cmd` to avoid creating async rescursive functions"

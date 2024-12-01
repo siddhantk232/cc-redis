@@ -13,6 +13,8 @@ pub enum Cmd {
     Multi,
     /// Execute a transaction
     Exec,
+    /// Abort a transaction
+    Discard,
 }
 
 /// Duration after which the associated key will be removed
@@ -81,6 +83,7 @@ pub fn parse_cmds(raw_cmds: Vec<RedisValueRef>) -> Result<Vec<Cmd>, CmdParseErro
             }
             "multi" => Cmd::Multi,
             "exec" => Cmd::Exec,
+            "discard" => Cmd::Discard,
             _ => {
                 unreachable!("unknown command: {:?}", raw_cmd);
             }
