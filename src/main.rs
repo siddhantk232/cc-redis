@@ -1,32 +1,22 @@
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::{net::SocketAddr, time::SystemTime};
 
-use core::net::SocketAddr;
 use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Encoder, FramedRead};
 
 mod cmd;
 mod resp;
+mod store;
 #[macro_use]
 mod utils;
 
-// temporary solution for today
-#[derive(Debug)]
-struct Val {
-    val: resp::RedisValueRef,
-    eat: Option<SystemTime>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct Store {
-    db: Arc<scc::HashMap<String, Val>>,
-    transactions: Arc<scc::HashMap<SocketAddr, Vec<cmd::Cmd>>>,
-}
+use cmd::Cmd;
+use resp::RedisValueRef;
+use store::{StoreRef, Val};
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
-    let store = Store::default();
+    let store = StoreRef::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:6379").await?;
 
     loop {
@@ -36,8 +26,11 @@ async fn main() -> Result<(), std::io::Error> {
         tokio::spawn(async move {
             loop {
                 let mut reader = FramedRead::new(&mut stream, resp::RespParser);
-                let input = reader.next().await.unwrap().unwrap();
-                assert!(matches!(input, resp::RedisValueRef::Array(_)));
+                let Some(input) = reader.next().await else {
+                    continue;
+                };
+                let input = input.unwrap();
+                assert!(matches!(input, RedisValueRef::Array(_)));
 
                 let input = input
                     .to_vec()
@@ -45,7 +38,7 @@ async fn main() -> Result<(), std::io::Error> {
                 let cmds = cmd::parse_cmds(input).unwrap();
 
                 for cmd in cmds {
-                    use cmd::Cmd::*;
+                    use Cmd::*;
                     match cmd {
                         Ping => {
                             stream.write(b"+PONG\r\n").await.unwrap();
@@ -56,34 +49,42 @@ async fn main() -> Result<(), std::io::Error> {
                                 .await
                                 .unwrap();
                         }
-                        Get(key) => {
-                            let res = match store.db.get_async(&key).await {
-                                Some(val) => {
-                                    let entry = val.get();
+                        Get(ref key) => {
+                            if let Some(resp) =
+                                queue_if_transaction(cmd.clone(), &conn, store.clone()).await
+                            {
+                                write_response!(stream, resp);
+                                return;
+                            }
 
+                            let res = match store.read(key).await {
+                                Some(entry) => {
                                     if entry.eat.is_some()
                                         && SystemTime::now() > entry.eat.expect("checked for none")
                                     {
-                                        dbg!("removed: ", val.remove_entry().0);
-                                        resp::RedisValueRef::NullBulkString
+                                        dbg!(store.remove_entry(key).await.unwrap());
+                                        RedisValueRef::NullBulkString
                                     } else {
-                                        assert!(matches!(
-                                            entry.val,
-                                            resp::RedisValueRef::String(_)
-                                        ));
+                                        assert!(matches!(entry.val, RedisValueRef::String(_)));
                                         entry.val.clone()
                                     }
                                 }
-                                None => resp::RedisValueRef::NullBulkString,
+                                None => RedisValueRef::NullBulkString,
                             };
 
                             write_response!(stream, res);
                         }
-                        Set(key, val, exp) => {
-                            dbg!(&val);
+                        Set(ref key, ref val, ref exp) => {
+                            if let Some(resp) =
+                                queue_if_transaction(cmd.clone(), &conn, store.clone()).await
+                            {
+                                write_response!(stream, resp);
+                                return;
+                            }
+
                             let val = Val {
-                                val,
-                                eat: exp.map(|x| match x {
+                                val: val.clone(),
+                                eat: exp.clone().map(|x| match x {
                                     cmd::Expiry::Ex(x) => SystemTime::now()
                                         .checked_add(std::time::Duration::from_secs(x as u64))
                                         .unwrap(),
@@ -92,27 +93,36 @@ async fn main() -> Result<(), std::io::Error> {
                                         .unwrap(),
                                 }),
                             };
-                            let _ = store.db.insert_async(key, val).await;
+                            let _ = store.insert(key.clone(), val).await;
                             stream.write(b"+OK\r\n").await.unwrap();
                         }
-                        Incr(key) => {
-                            let mut entry = store.db.entry_async(key).await.or_insert(Val {
-                                val: resp::RedisValueRef::String("0".into()),
+                        Incr(ref key) => {
+                            if let Some(resp) =
+                                queue_if_transaction(cmd.clone(), &conn, store.clone()).await
+                            {
+                                write_response!(stream, resp);
+                                return;
+                            }
+
+                            let entry = store.read(key).await.unwrap_or(Val {
+                                val: RedisValueRef::String("0".into()),
                                 eat: None,
                             });
 
-                            let val = entry.get().val.clone();
-                            let new_val = val.to_string_int().map(|v| v + 1);
+                            let new_val = entry.val.to_string_int().map(|v| v + 1);
 
                             let res = match new_val {
                                 Some(new_val) => {
-                                    let res =
-                                        resp::RedisValueRef::String(new_val.to_string().into());
-                                    entry.get_mut().val = res.clone();
+                                    let res = RedisValueRef::String(new_val.to_string().into());
+                                    let res = Val {
+                                        val: res,
+                                        eat: entry.eat,
+                                    };
+                                    store.update(key, res).await;
 
-                                    resp::RedisValueRef::Int(new_val)
+                                    RedisValueRef::Int(new_val)
                                 }
-                                None => resp::RedisValueRef::Error(
+                                None => RedisValueRef::Error(
                                     "ERR value is not an integer or out of range".into(),
                                 ),
                             };
@@ -120,24 +130,20 @@ async fn main() -> Result<(), std::io::Error> {
                             write_response!(stream, res);
                         }
                         Multi => {
-                            store.transactions.insert_async(conn, vec![]).await.unwrap();
+                            // TODO: do we support nested transactions?
+                            store.create_transaction(conn).await;
                             stream.write(b"+OK\r\n").await.unwrap();
                         }
                         Exec => {
-                            match store.transactions.read_async(&conn, |_sock, _tsx| {}).await {
-                                None => {
-                                    write_response!(
-                                        stream,
-                                        resp::RedisValueRef::Error("ERR EXEC without MULTI".into())
-                                    );
-                                }
-                                Some(()) => {
-                                    // TODO: actually exec tsx cmds
-                                    let _k = store.transactions.remove_async(&conn).await.expect(
-                                        "tsx must exist since None has already been checked",
-                                    );
-                                    write_response!(stream, resp::RedisValueRef::Array(vec![]));
-                                }
+                            if store.transaction_exists(&conn).await {
+                                // TODO: actually exec tsx cmds
+                                let _k = store.remove_transaction(&conn).await;
+                                write_response!(stream, RedisValueRef::Array(vec![]));
+                            } else {
+                                write_response!(
+                                    stream,
+                                    RedisValueRef::Error("ERR EXEC without MULTI".into())
+                                );
                             }
                         }
                     }
@@ -145,4 +151,20 @@ async fn main() -> Result<(), std::io::Error> {
             }
         });
     }
+}
+
+/// Queues the command if a transaction was started previously on this connection
+/// Return the +QUEUED response as [RedisValueRef::String]
+async fn queue_if_transaction(
+    cmd: Cmd,
+    conn: &SocketAddr,
+    store: StoreRef,
+) -> Option<RedisValueRef> {
+    if !store.transaction_exists(conn).await {
+        return None;
+    }
+
+    store.append_cmd_to_transaction(conn, cmd).await;
+
+    Some(RedisValueRef::String("QUEUED".into()))
 }

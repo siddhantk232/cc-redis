@@ -1,7 +1,7 @@
 use crate::resp::RedisValueRef;
 
 /// Redis commands
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Cmd {
     Ping,
     Echo(String),
@@ -16,7 +16,7 @@ pub enum Cmd {
 }
 
 /// Duration after which the associated key will be removed
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Expiry {
     /// Seconds
     Ex(i64),
