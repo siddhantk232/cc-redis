@@ -39,6 +39,7 @@ async fn main() -> Result<(), std::io::Error> {
                 let cmds = cmd::parse_cmds(input).unwrap();
 
                 for cmd in cmds {
+                    // Exec is recursive so it's handled separately from all the other commands
                     let resp = if let Cmd::Exec = cmd {
                         if store.transaction_exists(&conn).await {
                             let (_, cmds) = match store.remove_transaction(&conn).await {
