@@ -10,7 +10,7 @@ mod store;
 
 use cmd::Cmd;
 use resp::RedisValueRef;
-use store::{StoreRef, Val};
+use store::{Store, StoreRef, Val};
 
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
@@ -39,148 +39,137 @@ async fn main() -> Result<(), std::io::Error> {
                 let cmds = cmd::parse_cmds(input).unwrap();
 
                 for cmd in cmds {
-                    use Cmd::*;
-                    match cmd {
-                        Ping => {
-                            transport
-                                .send(RedisValueRef::String("PONG".into()))
-                                .await
-                                .unwrap();
-                        }
-                        Echo(msg) => {
-                            transport
-                                .send(RedisValueRef::String(msg.into()))
-                                .await
-                                .unwrap();
-                        }
-                        Get(ref key) => {
-                            if let Some(resp) =
-                                queue_if_transaction(cmd.clone(), &conn, store.clone()).await
-                            {
-                                transport.send(resp).await.unwrap();
-                                continue;
-                            }
-
-                            let res = match store.read(key).await {
-                                Some(entry) => {
-                                    if entry.eat.is_some()
-                                        && SystemTime::now() > entry.eat.expect("checked for none")
-                                    {
-                                        dbg!(store.remove_entry(key).await.unwrap());
-                                        RedisValueRef::NullBulkString
-                                    } else {
-                                        assert!(matches!(entry.val, RedisValueRef::String(_)));
-                                        entry.val.clone()
-                                    }
-                                }
-                                None => RedisValueRef::NullBulkString,
-                            };
-
-                            transport.send(res).await.unwrap();
-                        }
-                        Set(ref key, ref val, ref exp) => {
-                            if let Some(resp) =
-                                queue_if_transaction(cmd.clone(), &conn, store.clone()).await
-                            {
-                                transport.send(resp).await.unwrap();
-                                continue;
-                            }
-
-                            let val = Val {
-                                val: val.clone(),
-                                eat: exp.clone().map(|x| match x {
-                                    cmd::Expiry::Ex(x) => SystemTime::now()
-                                        .checked_add(std::time::Duration::from_secs(x as u64))
-                                        .unwrap(),
-                                    cmd::Expiry::Px(x) => SystemTime::now()
-                                        .checked_add(std::time::Duration::from_millis(x as u64))
-                                        .unwrap(),
-                                }),
-                            };
-                            let _ = store.insert(key.clone(), val).await;
-                            write_ok(&mut transport).await;
-                        }
-                        Incr(ref key) => {
-                            if let Some(resp) =
-                                queue_if_transaction(cmd.clone(), &conn, store.clone()).await
-                            {
-                                transport.send(resp).await.unwrap();
-                                continue;
-                            }
-
-                            let entry = store.read(key).await.unwrap_or(Val {
-                                val: RedisValueRef::String("0".into()),
-                                eat: None,
-                            });
-
-                            let new_val = entry.val.to_string_int().map(|v| v + 1);
-
-                            let res = match new_val {
-                                Some(new_val) => {
-                                    let res = RedisValueRef::String(new_val.to_string().into());
-                                    let res = Val {
-                                        val: res,
-                                        eat: entry.eat,
-                                    };
-                                    store.update(key.clone(), res).await;
-
-                                    RedisValueRef::Int(new_val)
-                                }
-                                None => RedisValueRef::Error(
-                                    "ERR value is not an integer or out of range".into(),
+                    let resp = if let Cmd::Exec = cmd {
+                        if store.transaction_exists(&conn).await {
+                            let (_, cmds) = match store.remove_transaction(&conn).await {
+                                Some(v) => v,
+                                None => unreachable!(
+                                    "transaction must exist because we just checked for it"
                                 ),
                             };
 
-                            transport.send(res).await.unwrap();
-                        }
-                        Multi => {
-                            // TODO: do we support nested transactions?
-                            store.create_transaction(conn).await;
-                            write_ok(&mut transport).await;
-                        }
-                        Exec => {
-                            if store.transaction_exists(&conn).await {
-                                // TODO: actually exec tsx cmds
-                                let _k = store.remove_transaction(&conn).await;
-                                transport.send(RedisValueRef::Array(vec![])).await.unwrap();
-                            } else {
-                                transport
-                                    .send(RedisValueRef::Error("ERR EXEC without MULTI".into()))
-                                    .await
-                                    .unwrap();
+                            let mut res = Vec::with_capacity(cmds.len());
+
+                            let mut st = store.inner.lock().unwrap();
+                            for tx_cmd in cmds {
+                                let resp = run_cmd(tx_cmd, &mut st, &conn);
+                                res.push(resp);
                             }
+                            drop(st);
+
+                            RedisValueRef::Array(res)
+                        } else {
+                            RedisValueRef::Error("ERR EXEC without MULTI".into())
                         }
-                    }
+                    } else {
+                        let mut st = store.inner.lock().unwrap();
+                        let resp = run_cmd(cmd, &mut st, &conn);
+                        drop(st);
+                        resp
+                    };
+
+                    transport.send(resp).await.unwrap();
                 }
             }
         });
     }
 }
 
+fn run_cmd(cmd: Cmd, store: &mut Store, conn: &SocketAddr) -> RedisValueRef {
+    use Cmd::*;
+    match cmd {
+        Ping => RedisValueRef::String("PONG".into()),
+        Echo(msg) => RedisValueRef::String(msg.into()),
+        Get(ref key) => {
+            if let Some(resp) = queue_if_transaction(cmd.clone(), &conn, store) {
+                return resp;
+            }
+
+            let res = match store.read(key) {
+                Some(entry) => {
+                    if entry.eat.is_some()
+                        && SystemTime::now() > entry.eat.expect("checked for none")
+                    {
+                        dbg!(store.remove_entry(key).unwrap());
+                        RedisValueRef::NullBulkString
+                    } else {
+                        assert!(matches!(entry.val, RedisValueRef::String(_)));
+                        entry.val.clone()
+                    }
+                }
+                None => RedisValueRef::NullBulkString,
+            };
+
+            res
+        }
+        Set(ref key, ref val, ref exp) => {
+            if let Some(resp) = queue_if_transaction(cmd.clone(), &conn, store) {
+                return resp;
+            }
+
+            let val = Val {
+                val: val.clone(),
+                eat: exp.clone().map(|x| match x {
+                    cmd::Expiry::Ex(x) => SystemTime::now()
+                        .checked_add(std::time::Duration::from_secs(x as u64))
+                        .unwrap(),
+                    cmd::Expiry::Px(x) => SystemTime::now()
+                        .checked_add(std::time::Duration::from_millis(x as u64))
+                        .unwrap(),
+                }),
+            };
+            let _ = store.insert(key.clone(), val);
+            RedisValueRef::String("OK".into())
+        }
+        Incr(ref key) => {
+            if let Some(resp) = queue_if_transaction(cmd.clone(), &conn, store) {
+                return resp;
+            }
+
+            let entry = store.read(key).unwrap_or(Val {
+                val: RedisValueRef::String("0".into()),
+                eat: None,
+            });
+
+            let new_val = entry.val.to_string_int().map(|v| v + 1);
+
+            let res = match new_val {
+                Some(new_val) => {
+                    let res = RedisValueRef::String(new_val.to_string().into());
+                    let res = Val {
+                        val: res,
+                        eat: entry.eat,
+                    };
+                    store.update(key.clone(), res);
+
+                    RedisValueRef::Int(new_val)
+                }
+                None => RedisValueRef::Error("ERR value is not an integer or out of range".into()),
+            };
+
+            res
+        }
+        Multi => {
+            // TODO: do we support nested transactions?
+            store.create_transaction(*conn);
+            RedisValueRef::String("OK".into())
+        }
+        Exec => {
+            panic!(
+                "Exec is handled outside of `run_cmd` to avoid creating async rescursive functions"
+            );
+        }
+    }
+}
+
 /// Queues the command if a transaction was started previously on this connection
 /// Return the +QUEUED response as [RedisValueRef::String]
-async fn queue_if_transaction(
-    cmd: Cmd,
-    conn: &SocketAddr,
-    store: StoreRef,
-) -> Option<RedisValueRef> {
-    if !store.transaction_exists(conn).await {
+fn queue_if_transaction(cmd: Cmd, conn: &SocketAddr, store: &mut Store) -> Option<RedisValueRef> {
+    if !store.transaction_exists(conn) {
         return None;
     }
 
-    store.append_cmd_to_transaction(conn, cmd).await;
+    store.append_cmd_to_transaction(conn, cmd);
 
     Some(RedisValueRef::String("QUEUED".into()))
-}
-
-#[inline]
-async fn write_ok<S>(transport: &mut S)
-where
-    S: futures_util::Sink<RedisValueRef> + Unpin,
-    S::Error: std::fmt::Debug,
-{
-    transport
-        .send(RedisValueRef::String("OK".into()))
-        .await
-        .unwrap();
 }

@@ -16,14 +16,63 @@ pub struct Val {
 }
 
 #[derive(Debug, Default)]
-struct Store {
+pub struct Store {
     pub db: scc::HashMap<String, Val>,
     pub transactions: scc::HashMap<SocketAddr, Vec<Cmd>>,
 }
 
+impl Store {
+    /// Check if a transaction exists for the given [SocketAddr]
+    /// A transaction is started with the `MULTI`
+    pub fn transaction_exists(&self, addr: &SocketAddr) -> bool {
+        self.transactions.read(addr, |_x, _y| {}).is_some()
+    }
+
+    /// Create an empty transaction for the given connection
+    pub fn create_transaction(&self, conn: SocketAddr) {
+        let _ = self.transactions.upsert(conn, vec![]);
+    }
+
+    pub fn remove_transaction(&self, conn: &SocketAddr) -> Option<(SocketAddr, Vec<Cmd>)> {
+        self.transactions.remove(conn)
+    }
+
+    /// Add [Cmd] to the transaction for the given [SocketAddr]
+    pub fn append_cmd_to_transaction(&self, addr: &SocketAddr, cmd: Cmd) {
+        let _ = self.transactions.entry(*addr).and_modify(|v| v.push(cmd));
+    }
+
+    /// read the value of `key` from the store
+    pub fn read<Q>(&self, key: &Q) -> Option<Val>
+    where
+        Q: Equivalent<String> + Hash,
+    {
+        self.db.read(key, |_k, v| v.clone())
+    }
+
+    /// Remove the entry from the store returning it if it exists
+    pub fn remove_entry<Q>(&self, key: &Q) -> Option<(String, Val)>
+    where
+        Q: Equivalent<String> + Hash,
+    {
+        self.db.remove(key)
+    }
+
+    /// Insert an entry in the store
+    /// Returns an error along with the supplied key-value pair if the key exists.
+    pub fn insert(&self, key: String, val: Val) -> Result<(), (String, Val)> {
+        self.db.insert(key, val)
+    }
+
+    /// Update the value
+    pub fn update(&self, key: String, val: Val) {
+        self.db.upsert(key, val);
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct StoreRef {
-    pub(self) inner: Arc<Mutex<Store>>,
+    pub inner: Arc<Mutex<Store>>,
 }
 
 impl StoreRef {
@@ -36,64 +85,13 @@ impl StoreRef {
     /// Check if a transaction exists for the given [SocketAddr]
     /// A transaction is started with the `MULTI`
     pub async fn transaction_exists(&self, addr: &SocketAddr) -> bool {
-        self.inner
-            .lock()
-            .unwrap()
-            .transactions
-            .read(addr, |_x, _y| {})
-            .is_some()
-    }
-
-    /// Create an empty transaction for the given connection
-    pub async fn create_transaction(&self, conn: SocketAddr) {
-        let _ = self.inner.lock().unwrap().transactions.upsert(conn, vec![]);
+        let store = self.inner.lock().unwrap();
+        store.transaction_exists(addr)
     }
 
     pub async fn remove_transaction(&self, conn: &SocketAddr) -> Option<(SocketAddr, Vec<Cmd>)> {
-        self.inner.lock().unwrap().transactions.remove(conn)
-    }
-
-    /// Add [Cmd] to the transaction for the given [SocketAddr]
-    pub async fn append_cmd_to_transaction(&self, addr: &SocketAddr, cmd: Cmd) {
-        let _ = self
-            .inner
-            .lock()
-            .unwrap()
-            .transactions
-            .entry(*addr)
-            .and_modify(|v| v.push(cmd));
-    }
-
-    #[allow(unused)]
-    pub async fn run_transaction() -> Result<(), ()> {
-        todo!()
-    }
-
-    /// read the value of `key` from the store
-    pub async fn read<Q>(&self, key: &Q) -> Option<Val>
-    where
-        Q: Equivalent<String> + Hash,
-    {
-        self.inner.lock().unwrap().db.read(key, |_k, v| v.clone())
-    }
-
-    /// Remove the entry from the store returning it if it exists
-    pub async fn remove_entry<Q>(&self, key: &Q) -> Option<(String, Val)>
-    where
-        Q: Equivalent<String> + Hash,
-    {
-        self.inner.lock().unwrap().db.remove(key)
-    }
-
-    /// Insert an entry in the store
-    /// Returns an error along with the supplied key-value pair if the key exists.
-    pub async fn insert(&self, key: String, val: Val) -> Result<(), (String, Val)> {
-        self.inner.lock().unwrap().db.insert(key, val)
-    }
-
-    /// Update the value
-    pub async fn update(&self, key: String, val: Val) {
-        self.inner.lock().unwrap().db.upsert(key, val);
+        let store = self.inner.lock().unwrap();
+        store.remove_transaction(conn)
     }
 }
 
@@ -109,21 +107,20 @@ mod test {
         let store = StoreRef::new();
         let addr = "127.0.0.1:2020".parse().unwrap();
 
-        assert_eq!(store.transaction_exists(&addr).await, false);
+        let store = store.inner.lock().unwrap();
+
+        assert_eq!(store.transaction_exists(&addr), false);
 
         let cmd1 = Cmd::Set("key".to_string(), RedisValueRef::String("val".into()), None);
-        store.create_transaction(addr).await;
-        store.append_cmd_to_transaction(&addr, cmd1.clone()).await;
+        store.create_transaction(addr);
+        store.append_cmd_to_transaction(&addr, cmd1.clone());
 
-        assert_eq!(store.transaction_exists(&addr).await, true);
+        assert_eq!(store.transaction_exists(&addr), true);
 
         let cmd2 = Cmd::Incr("key".to_string());
-        store.append_cmd_to_transaction(&addr, cmd2.clone()).await;
+        store.append_cmd_to_transaction(&addr, cmd2.clone());
 
         store
-            .inner
-            .lock()
-            .unwrap()
             .transactions
             .read_async(&addr, |_, cmds| {
                 assert_eq!(cmds, &vec![cmd1, cmd2]);
